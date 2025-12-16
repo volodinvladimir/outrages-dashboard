@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ЯвКурсі — графіки відключень</title>
+  <meta name="description" content="Графіки відключень (світло/вода) для Києва та Броварів. Автооновлення раз на годину." />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand__title">ЯвКурсі</div>
+      <div class="brand__subtitle">Графіки відключень • дані зі svitlo.live через публічний проксі</div>
+    </div>
+
+    <div class="topbar__actions">
+      <button id="refreshBtn" class="btn">Оновити</button>
+      <div class="meta">
+        <div class="meta__row"><span class="meta__k">Останнє оновлення даних:</span> <span id="lastUpdated">—</span></div>
+        <div class="meta__row"><span class="meta__k">Наступне автооновлення:</span> <span id="nextRefresh">—</span></div>
+      </div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- TOP HALF -->
+    <section class="card card--big">
+      <div class="card__head">
+        <h2 class="card__title">ЯвКурсі • Київ — світло (черга 6.1)</h2>
+        <div class="card__hint">Сьогодні та завтра (півгодинні слоти)</div>
+      </div>
+      <div class="card__body">
+        <div id="chart-kyiv" class="chart"></div>
+      </div>
+      <div class="card__foot">
+        <div class="legend">
+          <span class="legend__item legend__item--on">Є світло</span>
+          <span class="legend__item legend__item--off">Немає світла</span>
+          <span class="legend__item legend__item--unk">Невідомо</span>
+        </div>
+        <div class="source">
+          Джерело: <code id="sourceUrl">—</code>
+        </div>
+      </div>
+    </section>
+
+    <!-- BOTTOM HALF -->
+    <section class="grid2">
+      <section class="card">
+        <div class="card__head">
+          <h2 class="card__title">Дім — світло (Бровари, черга 3.1)</h2>
+          <div class="card__hint">Сьогодні та завтра</div>
+        </div>
+        <div class="card__body">
+          <div id="chart-brovary-light" class="chart"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card__head">
+          <h2 class="card__title">Дім — вода (Бровари, черга 1.2)</h2>
+          <div class="card__hint">Сьогодні та завтра</div>
+        </div>
+        <div class="card__body">
+          <div id="chart-brovary-water" class="chart"></div>
+        </div>
+        <div class="card__foot small">
+          Примітка: якщо окремого «водного» графіка немає в джерелі, цей блок може бути налаштований як графік по іншій черзі (наприклад, «насос/вода від електрики»).
+        </div>
+      </section>
+    </section>
+
+    <section class="card card--debug">
+      <div class="card__head">
+        <h2 class="card__title">Діагностика</h2>
+        <div class="card__hint">Якщо графіки не відображаються — дивіться помилки тут</div>
+      </div>
+      <div class="card__body">
+        <pre id="debug" class="debug">Завантаження…</pre>
+      </div>
+    </section>
+  </main>
+
+  <div id="tooltip" class="tooltip" role="tooltip" aria-hidden="true"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
