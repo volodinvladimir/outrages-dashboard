@@ -1,7 +1,16 @@
 /* eslint-disable no-console */
 
-const API_PRIMARY = "https://svitlo-proxy.svitlo-proxy.workers.dev/";   // публічний проксі (ключі сховані у воркері)
-const API_FALLBACK = "./data/svitlo_proxy_cache.json";                  // кеш, який може оновлювати GitHub Action
+/**
+ * Dashboard для графіків відключень (svitlo-proxy).
+ * Фікс: правильний парсинг формату:
+ * {
+ *   date_today, date_tomorrow,
+ *   regions: [{ cpu, name_ua, name_en, schedule: { "6.1": { "YYYY-MM-DD": { "00:00": 1, ... } } } }]
+ * }
+ */
+
+const API_PRIMARY = "https://svitlo-proxy.svitlo-proxy.workers.dev/"; // публічний проксі
+const API_FALLBACK = "./data/svitlo_proxy_cache.json";               // локальний кеш (опційно)
 const AUTO_REFRESH_MINUTES = 60;
 
 const CONFIG_DEFAULT = [
@@ -9,28 +18,32 @@ const CONFIG_DEFAULT = [
     id: "kyiv",
     mountId: "chart-kyiv",
     title: "ЯвКурсі • Київ — світло",
-    regionHints: ["м.Київ", "Київ", "Kyiv", "Kyiv City"],
+    cpu: "kyiv",
     queue: "6.1",
     mode: "electricity",
     invert: false,
+    regionHints: ["Київ", "Kyiv"],
   },
   {
     id: "brovary-light",
     mountId: "chart-brovary-light",
     title: "Дім — світло (Бровари)",
-    regionHints: ["Бровари", "Brovary", "Київська область", "Kyiv region"],
+    // Бровари входять у Київську область, у svitlo-proxy це регіон cpu=kiivska-oblast
+    cpu: "kiivska-oblast",
     queue: "3.1",
     mode: "electricity",
     invert: false,
+    regionHints: ["Київська", "Kyiv region", "Kyiv Oblast"],
   },
   {
     id: "brovary-water",
     mountId: "chart-brovary-water",
     title: "Дім — вода (Бровари)",
-    regionHints: ["Бровари", "Brovary", "Київська область", "Kyiv region"],
+    cpu: "kiivska-oblast",
     queue: "1.2",
     mode: "water",
     invert: false,
+    regionHints: ["Київська", "Kyiv region", "Kyiv Oblast"],
   },
 ];
 
@@ -45,24 +58,62 @@ const state = {
   timer: null,
 };
 
+/* -------------------- Config -------------------- */
+
 function loadConfig() {
   try {
     const raw = localStorage.getItem("yavkursi_svitlo_config");
-    if (!raw) return CONFIG_DEFAULT;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return CONFIG_DEFAULT;
-    return parsed;
+    const cfg = raw ? JSON.parse(raw) : null;
+    const finalCfg = Array.isArray(cfg) && cfg.length ? migrateConfig(cfg) : migrateConfig(CONFIG_DEFAULT);
+
+    // якщо міграція щось змінила — збережемо
+    localStorage.setItem("yavkursi_svitlo_config", JSON.stringify(finalCfg));
+    return finalCfg;
   } catch {
-    return CONFIG_DEFAULT;
+    const finalCfg = migrateConfig(CONFIG_DEFAULT);
+    try {
+      localStorage.setItem("yavkursi_svitlo_config", JSON.stringify(finalCfg));
+    } catch {}
+    return finalCfg;
   }
 }
 
-function saveConfig() {
-  localStorage.setItem("yavkursi_svitlo_config", JSON.stringify(state.config));
+function migrateConfig(cfg) {
+  // Міграція зі старого формату (де були лише regionHints і не було cpu)
+  const cloned = cfg.map((x) => ({ ...x }));
+
+  for (const item of cloned) {
+    item.queue = String(item.queue || "").trim();
+
+    // якщо cpu відсутній — намагаємось здогадатися
+    if (!item.cpu) {
+      const hintText = (item.regionHints || []).join(" ").toLowerCase();
+      if (hintText.includes("бровар") || hintText.includes("kyiv region") || hintText.includes("київська область")) {
+        item.cpu = "kiivska-oblast";
+      } else if (hintText.includes("м.київ") || hintText.includes("київ") || hintText.includes("kyiv city") || hintText === "kyiv") {
+        item.cpu = "kyiv";
+      }
+    }
+
+    // підстрахуємось для старих brovary-* конфігів
+    if (item.id === "brovary-light" || item.id === "brovary-water") {
+      item.cpu = "kiivska-oblast";
+    }
+    if (item.id === "kyiv") {
+      item.cpu = "kyiv";
+    }
+
+    if (!Array.isArray(item.regionHints)) item.regionHints = [];
+    if (!item.mode) item.mode = "electricity";
+    if (typeof item.invert !== "boolean") item.invert = false;
+  }
+
+  return cloned;
 }
 
+/* -------------------- Time helpers -------------------- */
+
 function nowKyiv() {
-  // браузер користувача зазвичай у Europe/Kyiv, але на всяк випадок:
   return new Date();
 }
 
@@ -95,7 +146,6 @@ async function fetchJson(url) {
 }
 
 async function loadData() {
-  // 1) пробуємо напряму (у браузері)
   try {
     const data = await fetchJson(API_PRIMARY);
     state.source = API_PRIMARY;
@@ -104,7 +154,6 @@ async function loadData() {
     debug(`Direct fetch failed: ${String(e)}\nTrying fallback cache: ${API_FALLBACK}`);
   }
 
-  // 2) fallback: локальний кеш (оновлюється GitHub Action)
   const data = await fetchJson(API_FALLBACK);
   state.source = API_FALLBACK;
   return data;
@@ -122,41 +171,55 @@ function asString(x) {
 
 function includesAny(haystack, needles) {
   const h = (haystack || "").toLowerCase();
-  return needles.some((n) => h.includes(String(n).toLowerCase()));
+  return (needles || []).some((n) => h.includes(String(n).toLowerCase()));
+}
+
+function mapToState(v, invert) {
+  let st = "unk";
+
+  if (v === true) st = "on";
+  else if (v === false) st = "off";
+  else if (typeof v === "number") {
+    if (v === 1) st = "on";
+    else if (v === 0) st = "off";
+    else st = "unk"; // часто 2 = "може бути"
+  } else if (typeof v === "string") {
+    const s = v.trim().toLowerCase();
+    if (s === "1" || s === "on" || s === "yes" || s === "true" || s === "light") st = "on";
+    else if (s === "0" || s === "off" || s === "no" || s === "false" || s === "blackout" || s === "outage") st = "off";
+    else if (s === "2" || s === "unknown" || s === "n/a") st = "unk";
+  }
+
+  if (invert) {
+    if (st === "on") return "off";
+    if (st === "off") return "on";
+  }
+  return st;
 }
 
 function normalizeSlots(input, invert = false) {
-  // Expected output: Array(48) with values: "on" | "off" | "unk"
+  // output: Array(48) with values: "on" | "off" | "unk"
   const out = new Array(48).fill("unk");
-
   if (input == null) return out;
 
-  // 1) array of 48 values (0/1/true/false/"on"/"off"/etc.)
+  // array of 48 values
   if (Array.isArray(input)) {
     const arr = input.slice(0, 48);
-    for (let i = 0; i < 48; i++) {
-      const v = arr[i];
-      out[i] = mapToState(v, invert);
-    }
+    for (let i = 0; i < 48; i++) out[i] = mapToState(arr[i], invert);
     return out;
   }
 
-  // 2) string of length >= 48 like "010011..."
+  // string like "0102..."
   if (typeof input === "string") {
-    const s = input.trim();
-    // remove non 0/1/2 chars
-    const cleaned = s.replace(/[^012]/g, "");
+    const cleaned = input.trim().replace(/[^012]/g, "");
     if (cleaned.length >= 48) {
-      for (let i = 0; i < 48; i++) {
-        out[i] = mapToState(cleaned[i], invert);
-      }
+      for (let i = 0; i < 48; i++) out[i] = mapToState(cleaned[i], invert);
       return out;
     }
   }
 
-  // 3) object mapping times to state
+  // object mapping "HH:MM" -> 0/1/2
   if (isObject(input)) {
-    // If it looks like {"00:00":"on", "00:30":"off", ...}
     const keys = Object.keys(input);
     const hasTimeKeys = keys.some((k) => /^\d{1,2}:\d{2}$/.test(k));
     if (hasTimeKeys) {
@@ -171,35 +234,10 @@ function normalizeSlots(input, invert = false) {
       return out;
     }
 
-    // If it looks like {slots:[...]} or {today:[...]}
     if (Array.isArray(input.slots)) return normalizeSlots(input.slots, invert);
   }
 
   return out;
-}
-
-function mapToState(v, invert) {
-  // Try to interpret many variants
-  let st = "unk";
-
-  if (v === true) st = "on";
-  else if (v === false) st = "off";
-  else if (typeof v === "number") {
-    if (v === 1) st = "on";
-    else if (v === 0) st = "off";
-    else st = "unk";
-  } else if (typeof v === "string") {
-    const s = v.trim().toLowerCase();
-    if (s === "1" || s === "on" || s === "yes" || s === "true" || s === "grid on" || s === "light") st = "on";
-    else if (s === "0" || s === "off" || s === "no" || s === "false" || s === "grid off" || s === "blackout" || s === "outage") st = "off";
-    else if (s === "2" || s === "unknown" || s === "n/a") st = "unk";
-  }
-
-  if (invert) {
-    if (st === "on") return "off";
-    if (st === "off") return "on";
-  }
-  return st;
 }
 
 function pick(obj, keys) {
@@ -210,99 +248,67 @@ function pick(obj, keys) {
 }
 
 function findAnyTimestamp(data) {
-  const candidates = [];
-  walk(data, (node) => {
-    if (!isObject(node)) return;
-    const v = pick(node, ["updated_at", "updatedAt", "last_update", "lastUpdate", "schedule_updated", "scheduleUpdated", "timestamp"]);
-    if (v) candidates.push(v);
-  });
-  if (candidates.length === 0) return null;
-  // pick the "largest" string/number-ish
-  return candidates[0];
-}
-
-function walk(node, fn, ctx = { regionTrail: [] }) {
-  fn(node, ctx);
-  if (Array.isArray(node)) {
-    for (const item of node) walk(item, fn, ctx);
-  } else if (isObject(node)) {
-    // update region context when sees name-ish keys
-    const name = pick(node, ["region_name", "regionName", "region", "name", "title", "city", "oblast", "area"]);
-    const nextCtx = { regionTrail: ctx.regionTrail };
-    if (typeof name === "string" && name.length <= 80) {
-      nextCtx.regionTrail = [...ctx.regionTrail, name];
-    }
-    for (const k of Object.keys(node)) {
-      walk(node[k], fn, nextCtx);
-    }
-  }
+  // у цьому проксі може не бути timestamp — тоді повернемо null
+  const ts = pick(data, ["timestamp", "updated_at", "updatedAt", "last_update", "lastUpdate"]);
+  return ts || null;
 }
 
 /**
- * Tries to extract {todaySlots, tomorrowSlots, meta} for a given regionHints + queue.
- * We use a best-effort heuristic because the proxy JSON can change.
+ * Нормальний парсер саме під svitlo-proxy:
+ * data.regions[].schedule[queue][YYYY-MM-DD] = { "00:00": 1, "00:30": 2, ... }
  */
-function extractSchedule(data, regionHints, queue, invert = false) {
-  const matches = [];
+function extractScheduleProxy(data, item) {
+  if (!data || !Array.isArray(data.regions)) return null;
 
-  walk(data, (node, ctx) => {
-    if (!isObject(node)) return;
+  const cpuWanted = String(item.cpu || "").trim();
+  const queue = String(item.queue || "").trim();
+  if (!queue) return null;
 
-    // look for queue identifiers
-    const q = pick(node, ["queue", "queue_id", "queueId", "group", "group_id", "groupId", "cherga", "черга"]);
-    const qStr = q != null ? String(q) : "";
+  const dateToday = asString(data.date_today);
+  const dateTomorrow = asString(data.date_tomorrow);
 
-    const regionText = (ctx.regionTrail || []).join(" / ");
+  // 1) find region by cpu
+  let region = null;
 
-    const regionOk = regionHints && regionHints.length
-      ? includesAny(regionText, regionHints) || includesAny(pick(node, ["region_name", "regionName", "region", "name", "title"]), regionHints)
-      : true;
+  if (cpuWanted) {
+    region = data.regions.find((r) => String(r.cpu || "").trim() === cpuWanted) || null;
+  }
 
-    const queueOk = qStr === queue
-      || qStr.replace(/\s/g, "") === queue.replace(/\s/g, "")
-      || (pick(node, ["queues"]) && Object.prototype.hasOwnProperty.call(node.queues, queue));
+  // 2) fallback by hints (name_ua/name_en/cpu)
+  if (!region && item.regionHints && item.regionHints.length) {
+    region = data.regions.find((r) => {
+      const text = `${r.cpu || ""} ${r.name_ua || ""} ${r.name_en || ""} ${r.name_ru || ""}`;
+      return includesAny(text, item.regionHints);
+    }) || null;
+  }
 
-    if (!regionOk || !queueOk) return;
+  if (!region || !isObject(region.schedule)) return null;
 
-    // possible schedules
-    let today = pick(node, ["today", "day_0", "d0", "schedule_today", "scheduleToday"]);
-    let tomorrow = pick(node, ["tomorrow", "day_1", "d1", "schedule_tomorrow", "scheduleTomorrow"]);
+  const qObj = region.schedule[queue];
+  if (!isObject(qObj)) return null;
 
-    // nested schedule object
-    if (!today || !tomorrow) {
-      const sch = pick(node, ["schedule", "graph", "outages", "slots"]);
-      if (isObject(sch)) {
-        today = today ?? pick(sch, ["today", "day_0", "d0"]);
-        tomorrow = tomorrow ?? pick(sch, ["tomorrow", "day_1", "d1"]);
-      }
-    }
+  // qObj може бути:
+  // { "2025-12-16": { "00:00": 1, ... }, "2025-12-17": { ... } }
+  // або інколи одразу { "00:00": 1, ... } (без дат)
+  const todayRaw = (dateToday && qObj[dateToday]) ? qObj[dateToday] : pick(qObj, ["today", "day_0", "d0"]);
+  const tomorrowRaw = (dateTomorrow && qObj[dateTomorrow]) ? qObj[dateTomorrow] : pick(qObj, ["tomorrow", "day_1", "d1"]);
 
-    // or in queues map
-    if ((!today || !tomorrow) && isObject(node.queues) && isObject(node.queues[queue])) {
-      const qObj = node.queues[queue];
-      today = today ?? pick(qObj, ["today", "day_0", "d0", "slots_today"]);
-      tomorrow = tomorrow ?? pick(qObj, ["tomorrow", "day_1", "d1", "slots_tomorrow"]);
-    }
+  // якщо дат немає, але це time-map — вважаймо це "today"
+  const looksLikeTimeMap = isObject(qObj) && Object.keys(qObj).some((k) => /^\d{1,2}:\d{2}$/.test(k));
+  const todayFinalRaw = todayRaw || (looksLikeTimeMap ? qObj : null);
 
-    const todaySlots = normalizeSlots(today, invert);
-    const tomorrowSlots = normalizeSlots(tomorrow, invert);
+  const todaySlots = normalizeSlots(todayFinalRaw, item.invert);
+  const tomorrowSlots = normalizeSlots(tomorrowRaw, item.invert);
 
-    // accept if at least something non-unknown
-    const score = scoreSlots(todaySlots) + scoreSlots(tomorrowSlots);
+  const score = scoreSlots(todaySlots) + scoreSlots(tomorrowSlots);
+  if (score <= 0) return null;
 
-    if (score > 0) {
-      matches.push({
-        score,
-        todaySlots,
-        tomorrowSlots,
-        regionText,
-        rawNode: node
-      });
-    }
-  });
-
-  matches.sort((a, b) => b.score - a.score);
-  return matches[0] || null;
+  return {
+    score,
+    todaySlots,
+    tomorrowSlots,
+    regionText: `${region.name_ua || region.name_en || region.cpu || "region"} (${region.cpu || "—"})`,
+  };
 }
 
 function scoreSlots(slots) {
@@ -318,7 +324,14 @@ function buildHoursBar() {
   return div;
 }
 
-function renderChart(mountId, schedule, label) {
+function textsForMode(mode) {
+  if (mode === "water") {
+    return { on: "Є вода", off: "Немає води", unk: "Невідомо" };
+  }
+  return { on: "Є світло", off: "Немає світла", unk: "Невідомо" };
+}
+
+function renderChart(mountId, schedule, label, mode = "electricity") {
   const mount = $(mountId);
   mount.innerHTML = "";
 
@@ -328,6 +341,7 @@ function renderChart(mountId, schedule, label) {
   tomorrow.setDate(today.getDate() + 1);
 
   const nowIdx = halfHourIndexFromMinutes(minutesSinceMidnight(now));
+  const t = textsForMode(mode);
 
   const rows = [
     { dayLabel: `Сьогодні (${formatDateUA(today)})`, slots: schedule?.todaySlots || new Array(48).fill("unk"), isToday: true },
@@ -358,7 +372,7 @@ function renderChart(mountId, schedule, label) {
       const start = i * 30;
       const end = start + 30;
       slot.dataset.tipTitle = row.dayLabel;
-      slot.dataset.tipText = `${formatTimeHHMM(start)}–${formatTimeHHMM(end)} • ${st === "on" ? "Є світло" : st === "off" ? "Немає світла" : "Невідомо"}`;
+      slot.dataset.tipText = `${formatTimeHHMM(start)}–${formatTimeHHMM(end)} • ${st === "on" ? t.on : st === "off" ? t.off : t.unk}`;
 
       slot.addEventListener("mousemove", onSlotMove);
       slot.addEventListener("mouseenter", onSlotEnter);
@@ -472,7 +486,6 @@ async function refresh() {
 
     $("sourceUrl").textContent = state.source || "—";
 
-    // last update best-effort
     state.lastUpdated = findAnyTimestamp(data);
     $("lastUpdated").textContent = state.lastUpdated ? String(state.lastUpdated) : "—";
 
@@ -481,15 +494,20 @@ async function refresh() {
 
     // Render all charts
     for (const item of state.config) {
-      const schedule = extractSchedule(data, item.regionHints, item.queue, item.invert);
-      renderChart(item.mountId, schedule, `${item.queue}`);
-      appendDebug(`[${item.id}] regionHints=${JSON.stringify(item.regionHints)} queue=${item.queue} => ${schedule ? "OK" : "NOT FOUND"}`);
-      if (schedule && schedule.regionText) appendDebug(`  matched region trail: ${schedule.regionText}`);
+      const schedule = extractScheduleProxy(data, item);
+      renderChart(item.mountId, schedule, `черга ${item.queue}`, item.mode);
+
+      appendDebug(
+        `[${item.id}] cpu=${item.cpu || "—"} queue=${item.queue} => ${schedule ? "OK" : "NOT FOUND"}`
+      );
+      if (schedule?.regionText) appendDebug(`  matched: ${schedule.regionText}`);
     }
 
     computeNextRefresh();
   } catch (e) {
-    debug(`Помилка: ${String(e)}\n\nМожливі причини:\n- CORS (браузер блокує запит до проксі)\n- Проксі тимчасово недоступний\n- Формат JSON змінився\n\nСпробуйте:\n1) Увімкнути GitHub Action (див. README) і оновити сторінку\n2) Відкрити консоль браузера та надіслати помилку`);
+    debug(
+      `Помилка: ${String(e)}\n\nМожливі причини:\n- CORS (браузер блокує запит до проксі)\n- Проксі тимчасово недоступний\n- Формат JSON змінився\n\nСпробуйте:\n1) Оновити сторінку\n2) Відкрити консоль браузера та надіслати помилку`
+    );
   } finally {
     $("refreshBtn").disabled = false;
     $("refreshBtn").textContent = "Оновити";
@@ -500,7 +518,6 @@ function startAutoRefresh() {
   if (state.timer) clearInterval(state.timer);
 
   state.timer = setInterval(() => {
-    // if it is time (or past) — refresh
     if (state.nextRefreshAt && new Date() >= state.nextRefreshAt) {
       refresh();
     } else {
