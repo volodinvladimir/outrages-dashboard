@@ -1,43 +1,30 @@
-/* YavKursi • Svitlo dashboard (Kyiv + Home)
-   Bottom layout requested:
-   - Left bottom card: TODAY -> Light (3.1) then Water (1.2)
-   - Right bottom card: TOMORROW -> Light (3.1) then Water (1.2)
-*/
-
 (() => {
   "use strict";
 
-  // =========================
-  // CONFIG
-  // =========================
   const DATA_URL = "https://svitlo-proxy.svitlo-proxy.workers.dev/";
+  const AUTO_REFRESH_MIN = 60;
 
-  // Kyiv (electricity)
   const KYIV = {
     id: "kyiv",
     title: "ЯвКурсі · Київ — світло (черга 6.1)",
     subtitle: "Сьогодні та завтра (півгодинні слоти)",
     queue: "6.1",
-    // працює у вас (по діагностиці було cpu=kyiv => OK)
     regionCpuCandidates: ["kyiv"],
     regionHints: ["м.Київ", "Київ", "Kyiv", "Kyiv City"],
   };
 
-  // Home (Brovary)
   const HOME = {
     cityLabel: "Бровари",
-    // у вас працює (cpu=kyivska-oblast => OK)
-    regionCpuCandidates: ["kyivska-oblast"],
-    regionHints: ["Бровари", "Brovary", "Київська область", "Kyiv region"],
+    // головний фікс: у різних джерелах буває kyivska-oblast або kiivska-oblast
+    regionCpuCandidates: ["kyivska-oblast", "kiivska-oblast", "kyiv_oblast", "kyivska_oblast"],
+    regionHints: ["Бровари", "Brovary", "Київська область", "Kyiv region", "Kyiv Oblast"],
     light: { queue: "3.1", label: "Світло", titleSuffix: "(черга 3.1)" },
     water: { queue: "1.2", label: "Вода", titleSuffix: "(черга 1.2)" },
   };
 
-  const AUTO_REFRESH_MIN = 60;
+  let autoTimer = null;
 
-  // =========================
-  // DOM + CSS (self-contained)
-  // =========================
+  // ---------------- CSS + Layout ----------------
   function injectCss() {
     if (document.getElementById("yk-svitlo-css")) return;
     const style = document.createElement("style");
@@ -45,11 +32,8 @@
     style.textContent = `
       :root{
         --bg:#0b0e12;
-        --card:#0f141b;
-        --card2:#0d1117;
         --text:#e6edf3;
         --muted:#9aa4b2;
-        --line:#1b2330;
         --green:#4ade80;
         --red:#fb4b4b;
         --gray:#4b5563;
@@ -63,12 +47,10 @@
                     radial-gradient(900px 500px at 90% 10%, rgba(251,75,75,.10), transparent 60%),
                     var(--bg);
         color:var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
       }
       .wrap{max-width:1280px;margin:0 auto;padding:18px 18px 30px}
-      .topbar{
-        display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px
-      }
+      .topbar{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
       .brand{display:flex;flex-direction:column;gap:4px}
       .brand h1{font-size:22px;line-height:1.1;margin:0}
       .brand p{margin:0;color:var(--muted);font-size:13px}
@@ -93,19 +75,9 @@
         padding:10px 12px;
         min-width: 240px;
       }
-      .grid{
-        display:grid;
-        grid-template-columns: 1fr;
-        gap:14px;
-      }
-      .grid2{
-        display:grid;
-        grid-template-columns: 1fr 1fr;
-        gap:14px;
-      }
-      @media (max-width: 980px){
-        .grid2{grid-template-columns:1fr}
-      }
+      .grid{display:grid;grid-template-columns:1fr;gap:14px}
+      .grid2{display:grid;grid-template-columns: 1fr 1fr;gap:14px}
+      @media (max-width: 980px){ .grid2{grid-template-columns:1fr} }
 
       .card{
         background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.015));
@@ -113,61 +85,27 @@
         border-radius: var(--radius);
         box-shadow: var(--shadow);
         padding:14px 14px 12px;
-        overflow:hidden;
       }
       .cardhead{display:flex;flex-direction:column;gap:3px;margin-bottom:10px}
       .cardhead .title{font-size:16px;font-weight:800;margin:0}
       .cardhead .subtitle{font-size:12px;color:var(--muted);margin:0}
 
-      .dayLabel{
-        display:flex;align-items:center;justify-content:space-between;
-        margin:10px 0 6px;
-        color:var(--muted);
-        font-size:12px;
-        font-weight:700;
-      }
-      .axis{
-        display:flex;
-        justify-content:space-between;
-        color:var(--muted);
-        font-size:11px;
-        margin:0 0 6px;
-        padding:0 1px;
-      }
-      .timeline{
-        display:grid;
-        grid-template-columns: repeat(48, minmax(8px, 1fr));
-        gap:3px;
-      }
-      .slot{
-        height:14px;
-        border-radius:4px;
-        background: var(--gray);
-        box-shadow: inset 0 0 0 1px rgba(255,255,255,.08);
-      }
+      .dayLabel{display:flex;align-items:center;justify-content:space-between;margin:10px 0 6px;color:var(--muted);font-size:12px;font-weight:700}
+      .axis{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin:0 0 6px;padding:0 1px}
+      .timeline{display:grid;grid-template-columns: repeat(48, minmax(8px, 1fr));gap:3px}
+      .slot{height:14px;border-radius:4px;background: var(--gray);box-shadow: inset 0 0 0 1px rgba(255,255,255,.08)}
       .slot.on{background: var(--green)}
       .slot.off{background: var(--red)}
       .slot.unknown{background: var(--gray)}
-      .slot.now{
-        outline:2px solid rgba(255,255,255,.75);
-        outline-offset:1px;
-      }
+      .slot.now{outline:2px solid rgba(255,255,255,.75);outline-offset:1px}
 
-      .legend{
-        display:flex;gap:14px;align-items:center;flex-wrap:wrap;
-        margin-top:10px;color:var(--muted);font-size:12px
-      }
+      .legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:12px}
       .dot{width:10px;height:10px;border-radius:999px;display:inline-block;margin-right:8px}
       .dot.on{background:var(--green)}
       .dot.off{background:var(--red)}
       .dot.unknown{background:var(--gray)}
 
-      .source{
-        margin-top:10px;
-        color:var(--muted);
-        font-size:12px;
-        display:flex;justify-content:flex-end;
-      }
+      .source{margin-top:10px;color:var(--muted);font-size:12px;display:flex;justify-content:flex-end}
 
       .diag{
         margin-top:14px;
@@ -184,20 +122,18 @@
     document.head.appendChild(style);
   }
 
-  function buildLayout() {
-    const root =
-      document.getElementById("app") ||
-      document.querySelector("main") ||
-      document.body;
+  function escapeHtml(s) {
+    return String(s ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
 
-    // не чіпаємо head, але чистимо контейнер
-    if (root !== document.body) root.innerHTML = "";
-    else {
-      // якщо body — залишимо існуючий контент, але додамо в кінець (на випадок вашого HTML)
-      // і уникнемо дублювань
-      const old = document.getElementById("yk-root");
-      if (old) old.remove();
-    }
+  function buildLayout() {
+    const old = document.getElementById("yk-root");
+    if (old) old.remove();
 
     const wrap = document.createElement("div");
     wrap.className = "wrap";
@@ -211,7 +147,7 @@
         </div>
         <div class="actions">
           <button class="btn" id="btnRefresh">Оновити</button>
-          <div class="meta" id="metaBox">
+          <div class="meta">
             <div>Останнє оновлення даних: <b id="lastUpdate">—</b></div>
             <div>Наступне автооновлення: <b id="nextUpdate">—</b></div>
           </div>
@@ -234,7 +170,7 @@
         </div>
 
         <div class="grid2">
-          <div class="card" id="cardHomeToday">
+          <div class="card">
             <div class="cardhead">
               <p class="title">Дім — сьогодні</p>
               <p class="subtitle" id="homeTodaySub">—</p>
@@ -242,7 +178,7 @@
             <div id="homeTodayContent"></div>
           </div>
 
-          <div class="card" id="cardHomeTomorrow">
+          <div class="card">
             <div class="cardhead">
               <p class="title">Дім — завтра</p>
               <p class="subtitle" id="homeTomorrowSub">—</p>
@@ -261,13 +197,14 @@
       </div>
     `;
 
-    if (root === document.body) document.body.appendChild(wrap);
-    else root.appendChild(wrap);
+    document.body.appendChild(wrap);
   }
 
-  // =========================
-  // DATA PARSING (robust)
-  // =========================
+  // ---------------- Data helpers ----------------
+  function normalizeText(s) {
+    return String(s || "").trim().toLowerCase();
+  }
+
   function asArrayRegions(regions) {
     if (!regions) return [];
     if (Array.isArray(regions)) return regions;
@@ -275,77 +212,37 @@
     return [];
   }
 
-  function normalizeText(s) {
-    return String(s || "").trim().toLowerCase();
-  }
-
+  // Головний фікс: НІЯКОГО fallback "перший регіон"
   function pickRegion(allRegions, cpuCandidates, hints) {
-    // 1) exact cpu match
-    if (cpuCandidates?.length) {
-      for (const cpu of cpuCandidates) {
-        const hit = allRegions.find(r => normalizeText(r.cpu) === normalizeText(cpu));
-        if (hit) return hit;
-      }
+    const cpuList = (cpuCandidates || []).map(normalizeText).filter(Boolean);
+    if (cpuList.length) {
+      const hit = allRegions.find(r => cpuList.includes(normalizeText(r.cpu)));
+      if (hit) return hit;
     }
-    // 2) hints in name/title
+
     const hs = (hints || []).map(normalizeText).filter(Boolean);
     if (hs.length) {
       const hit = allRegions.find(r => {
-        const name = normalizeText(r.name || r.title || r.city || r.region || "");
-        return hs.some(h => name.includes(h));
+        const text = [
+          r.cpu, r.name, r.title, r.city, r.region,
+          r.name_ua, r.name_en, r.name_ru
+        ].map(normalizeText).join(" ");
+        return hs.some(h => text.includes(h));
       });
       if (hit) return hit;
     }
-    // 3) fallback first region
-    return allRegions[0] || null;
+
+    return null;
   }
 
   function getScheduleContainer(region) {
     if (!region || typeof region !== "object") return null;
-    return (
-      region.queues ||
-      region.queue ||
-      region.schedules ||
-      region.schedule ||
-      region.outages ||
-      region.data ||
-      region
-    );
+    return region.schedule || region.queues || region.schedules || region.queue || null;
   }
 
-  function getQueueObject(scheduleContainer, queueKey) {
-    if (!scheduleContainer) return null;
-
-    // direct by key
-    if (typeof scheduleContainer === "object" && scheduleContainer[queueKey]) return scheduleContainer[queueKey];
-
-    // nested common patterns
-    if (scheduleContainer.queues && scheduleContainer.queues[queueKey]) return scheduleContainer.queues[queueKey];
-    if (scheduleContainer.schedule && scheduleContainer.schedule[queueKey]) return scheduleContainer.schedule[queueKey];
-
-    // try to find by "queue"/"id" property
-    const values = typeof scheduleContainer === "object" ? Object.values(scheduleContainer) : [];
-    const hit = values.find(v => v && typeof v === "object" && (v.queue === queueKey || v.id === queueKey));
-    return hit || null;
-  }
-
-  function getDayMap(queueObj, dateStr) {
-    if (!queueObj) return null;
-
-    // direct date keys
-    if (queueObj[dateStr]) return queueObj[dateStr];
-
-    // common containers
-    const containers = ["days", "data", "schedule", "by_date", "dates"];
-    for (const k of containers) {
-      if (queueObj[k] && queueObj[k][dateStr]) return queueObj[k][dateStr];
-    }
-
-    // today/tomorrow arrays
-    if (dateStr === "__today__" && queueObj.today) return queueObj.today;
-    if (dateStr === "__tomorrow__" && queueObj.tomorrow) return queueObj.tomorrow;
-
-    return null;
+  function getQueueObject(container, queueKey) {
+    if (!container || typeof container !== "object") return null;
+    return container[queueKey] || null;
   }
 
   function slotKey(i) {
@@ -355,52 +252,46 @@
     return `${hh}:${mm}`;
   }
 
-  function toState(v) {
-    if (v === null || v === undefined) return "unknown";
-    if (typeof v === "boolean") return v ? "on" : "off";
-    if (typeof v === "number") return v > 0 ? "on" : "off";
+  // Під svitlo-proxy: значення часто 0/1/2
+  // Робимо універсально:
+  // - якщо є 2 => 1=ON, 2=OFF, 0=UNKNOWN
+  // - якщо 2 немає => 0=ON, 1=OFF
+  function detectScheme(dayMap) {
+    const vals = Object.values(dayMap || {})
+      .map(v => (typeof v === "string" ? Number(v) : v))
+      .filter(v => Number.isFinite(v));
+    return vals.includes(2) ? "012" : "01";
+  }
 
-    const s = normalizeText(v);
-    if (!s) return "unknown";
-    if (["1", "on", "yes", "true", "light", "power", "available"].includes(s)) return "on";
-    if (["0", "off", "no", "false", "blackout", "unavailable"].includes(s)) return "off";
+  function decodeValue(v, scheme) {
+    const n = (typeof v === "string") ? Number(v) : v;
+    if (!Number.isFinite(n)) return "unknown";
 
-    // some APIs may send "0/1" strings or "ON/OFF"
-    if (s.includes("on")) return "on";
-    if (s.includes("off")) return "off";
-
-    return "unknown";
+    if (scheme === "012") {
+      if (n === 1) return "on";
+      if (n === 2) return "off";
+      return "unknown";
+    } else {
+      // 01
+      if (n === 0) return "on";
+      if (n === 1) return "off";
+      return "unknown";
+    }
   }
 
   function normalizeTo48(dayMap) {
-    // Array case
-    if (Array.isArray(dayMap)) {
-      // If already 48
-      if (dayMap.length === 48) return dayMap.map(toState);
+    const out = new Array(48).fill("unknown");
+    if (!dayMap || typeof dayMap !== "object") return out;
 
-      // If 24 hours -> expand each hour to 2 slots
-      if (dayMap.length === 24) {
-        const out = [];
-        for (const h of dayMap) out.push(toState(h), toState(h));
-        return out;
-      }
-    }
+    const scheme = detectScheme(dayMap);
 
-    // Object keyed by HH:MM
-    const out = [];
     for (let i = 0; i < 48; i++) {
       const k = slotKey(i);
-      const v =
-        (dayMap && (dayMap[k] ?? dayMap[`${k}:00`] ?? dayMap[`${k}:0`])) ??
-        null;
-      out.push(toState(v));
+      out[i] = decodeValue(dayMap[k], scheme);
     }
     return out;
   }
 
-  // =========================
-  // RENDER
-  // =========================
   function axisEl() {
     const axis = document.createElement("div");
     axis.className = "axis";
@@ -427,7 +318,6 @@
       const st = slots48[i] || "unknown";
       const cell = document.createElement("div");
       cell.className = `slot ${st}${i === nowIdx ? " now" : ""}`;
-      cell.title = `${slotKey(i)} • ${st === "on" ? "є світло" : st === "off" ? "немає світла" : "невідомо"}`;
       tl.appendChild(cell);
     }
 
@@ -435,33 +325,17 @@
     return wrap;
   }
 
-  function renderDayBlock(mount, dayLabel, slots48, { highlightNow = false } = {}) {
+  function renderBlock(mount, label, slots48, highlightNow) {
     const row = document.createElement("div");
-
     const lbl = document.createElement("div");
     lbl.className = "dayLabel";
-    lbl.innerHTML = `<span>${escapeHtml(dayLabel)}</span><span></span>`;
+    lbl.innerHTML = `<span>${escapeHtml(label)}</span><span></span>`;
     row.appendChild(lbl);
-
     row.appendChild(renderTimeline(slots48, { highlightNow }));
     mount.appendChild(row);
   }
 
-  function renderHomeDayCard(mount, dayDate, lightSlots, waterSlots, highlightNow) {
-    // Light
-    const lightTitle = `${HOME.light.label} ${HOME.light.titleSuffix}`;
-    const waterTitle = `${HOME.water.label} ${HOME.water.titleSuffix}`;
-
-    renderDayBlock(mount, lightTitle, lightSlots, { highlightNow });
-    renderDayBlock(mount, waterTitle, waterSlots, { highlightNow });
-  }
-
-  // =========================
-  // FETCH + MAIN
-  // =========================
-  let autoTimer = null;
-  let lastLoadedAt = null;
-
+  // ---------------- Refresh ----------------
   function setText(id, val) {
     const el = document.getElementById(id);
     if (el) el.textContent = val;
@@ -491,38 +365,30 @@
     return await r.json();
   }
 
-  function escapeHtml(s) {
-    return String(s ?? "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#039;");
-  }
-
   function resolveSchedule(data, spec, queueKey, diagLines, tag) {
     const regions = asArrayRegions(data.regions);
     const region = pickRegion(regions, spec.regionCpuCandidates, spec.regionHints);
 
     if (!region) {
-      diagLines.push(`[${tag}] region => NOT FOUND`);
+      diagLines.push(`[${tag}] region => NOT FOUND (cpuCandidates=${JSON.stringify(spec.regionCpuCandidates)})`);
+      diagLines.push(`  available cpu (sample): ${regions.map(r => r.cpu).filter(Boolean).slice(0, 25).join(", ")}`);
       return null;
     }
 
-    const scheduleContainer = getScheduleContainer(region);
-    const queueObj = getQueueObject(scheduleContainer, queueKey);
+    const container = getScheduleContainer(region);
+    const qObj = getQueueObject(container, queueKey);
 
-    if (!queueObj) {
+    if (!qObj) {
       diagLines.push(`[${tag}] cpu=${region.cpu || "?"} queue=${queueKey} => NOT FOUND`);
+      diagLines.push(`  available queues (sample): ${Object.keys(container || {}).slice(0, 30).join(", ")}`);
       return null;
     }
 
-    const todayKey = data.date_today || "__today__";
-    const tomorrowKey = data.date_tomorrow || "__tomorrow__";
+    const dt = data.date_today;
+    const d2 = data.date_tomorrow;
 
-    // try exact date keys, else fallback to today/tomorrow fields
-    const todayMap = getDayMap(queueObj, todayKey) ?? getDayMap(queueObj, "__today__");
-    const tomorrowMap = getDayMap(queueObj, tomorrowKey) ?? getDayMap(queueObj, "__tomorrow__");
+    const todayMap = (dt && qObj[dt]) ? qObj[dt] : null;
+    const tomorrowMap = (d2 && qObj[d2]) ? qObj[d2] : null;
 
     const todaySlots = normalizeTo48(todayMap || {});
     const tomorrowSlots = normalizeTo48(tomorrowMap || {});
@@ -538,16 +404,16 @@
       diag.push("Завантажую дані…");
       const data = await fetchJson(DATA_URL);
 
-      lastLoadedAt = new Date();
-      setText("lastUpdate", `${formatTime(lastLoadedAt)}`);
+      const now = new Date();
+      setText("lastUpdate", formatTime(now));
       scheduleNextAuto();
 
       diag.push(`Data loaded from: ${DATA_URL}`);
       diag.push(`Top-level keys: ${Object.keys(data || {}).join(", ")}`);
 
-      // subtitles with dates
       const dt = data.date_today ? String(data.date_today) : "сьогодні";
       const d2 = data.date_tomorrow ? String(data.date_tomorrow) : "завтра";
+
       const homeTodaySub = document.getElementById("homeTodaySub");
       const homeTomorrowSub = document.getElementById("homeTomorrowSub");
       if (homeTodaySub) homeTodaySub.textContent = `${HOME.cityLabel} • ${dt}`;
@@ -557,13 +423,12 @@
       const kyiv = resolveSchedule(data, KYIV, KYIV.queue, diag, "kyiv");
       const kyivMount = document.getElementById("kyivContent");
       if (kyivMount) kyivMount.innerHTML = "";
-
       if (kyiv && kyivMount) {
-        renderDayBlock(kyivMount, `Сьогодні (${dt})`, kyiv.todaySlots, { highlightNow: true });
-        renderDayBlock(kyivMount, `Завтра (${d2})`, kyiv.tomorrowSlots, { highlightNow: false });
+        renderBlock(kyivMount, `Сьогодні (${dt})`, kyiv.todaySlots, true);
+        renderBlock(kyivMount, `Завтра (${d2})`, kyiv.tomorrowSlots, false);
       }
 
-      // HOME (today card + tomorrow card)
+      // HOME
       const homeLight = resolveSchedule(data, HOME, HOME.light.queue, diag, "brovary-light");
       const homeWater = resolveSchedule(data, HOME, HOME.water.queue, diag, "brovary-water");
 
@@ -574,22 +439,12 @@
 
       if (homeLight && homeWater && homeTodayMount && homeTomorrowMount) {
         // LEFT: today (Light + Water)
-        renderHomeDayCard(
-          homeTodayMount,
-          dt,
-          homeLight.todaySlots,
-          homeWater.todaySlots,
-          true
-        );
+        renderBlock(homeTodayMount, `Світло ${HOME.light.titleSuffix}`, homeLight.todaySlots, true);
+        renderBlock(homeTodayMount, `Вода ${HOME.water.titleSuffix}`, homeWater.todaySlots, true);
 
         // RIGHT: tomorrow (Light + Water)
-        renderHomeDayCard(
-          homeTomorrowMount,
-          d2,
-          homeLight.tomorrowSlots,
-          homeWater.tomorrowSlots,
-          false
-        );
+        renderBlock(homeTomorrowMount, `Світло ${HOME.light.titleSuffix}`, homeLight.tomorrowSlots, false);
+        renderBlock(homeTomorrowMount, `Вода ${HOME.water.titleSuffix}`, homeWater.tomorrowSlots, false);
       } else {
         if (!homeLight) diag.push("[home] light schedule missing");
         if (!homeWater) diag.push("[home] water schedule missing");
@@ -604,17 +459,11 @@
     }
   }
 
-  // =========================
-  // BOOT
-  // =========================
   function boot() {
     injectCss();
     buildLayout();
-
     const btn = document.getElementById("btnRefresh");
-    if (btn) btn.addEventListener("click", () => refresh());
-
-    // first load
+    if (btn) btn.addEventListener("click", refresh);
     refresh();
   }
 
