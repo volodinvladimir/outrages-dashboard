@@ -22,7 +22,7 @@
 
   let autoTimer = null;
 
-  // ---------- CSS (інжектимо, щоб НЕ залежати від style.css) ----------
+  // ---------- CSS (інжектимо) ----------
   function injectCss() {
     if (document.getElementById("yk-css")) return;
 
@@ -92,12 +92,29 @@ body{
   display:flex;align-items:center;justify-content:space-between;
   margin:10px 0 6px;color:var(--muted);font-size:12px;font-weight:700
 }
-.axis{
-  display:flex;justify-content:space-between;
-  color:var(--muted);font-size:11px;margin:0 0 6px;padding:0 1px;
-}
 
-/* ✅ мобільний фікс: всі 48 слотів завжди вміщаються, без обрізання */
+/* ✅ підписи тільки в моменти зміни */
+.changes{
+  position:relative;
+  height:34px;
+  margin: 0 0 6px;
+}
+.chg{
+  position:absolute;
+  top:0;
+  transform: translateX(-50%);
+  font-size:11px;
+  color: var(--text);
+  padding:2px 6px;
+  border-radius:999px;
+  background: rgba(0,0,0,.35);
+  border:1px solid rgba(255,255,255,.14);
+  white-space:nowrap;
+}
+.chg.alt{ top:18px; }
+.chg.on{ border-color: rgba(74,222,128,.55); }
+.chg.off{ border-color: rgba(251,75,75,.55); }
+
 .timelineWrap{ position:relative; min-width:0; }
 .timeline{
   display:grid;
@@ -115,6 +132,9 @@ body{
 .slot.off{background: var(--red)}
 .slot.unknown{background: var(--gray)}
 
+/* ✅ завтра приглушено */
+.timeline.dim .slot{ opacity:.68; }
+
 /* ✅ “ЗАРАЗ” — дуже помітно */
 .slot.now{
   outline:none;
@@ -122,20 +142,21 @@ body{
     0 0 0 3px rgba(255,255,255,.95),
     0 0 18px rgba(255,255,255,.65);
   position:relative;
-  z-index:2;
+  z-index: 3;
 }
 .nowLine{
   position:absolute;
-  top:-8px;
-  bottom:-8px;
-  width:4px;
+  top:-10px;
+  bottom:-10px;
+  width:5px;
   transform: translateX(-50%);
   background: rgba(255,255,255,.95);
   border-radius: 999px;
   box-shadow:
     0 0 0 2px rgba(0,0,0,.55),
-    0 0 18px rgba(255,255,255,.65);
+    0 0 18px rgba(255,255,255,.75);
   pointer-events:none;
+  z-index: 4;
   animation: nowPulse 1.15s ease-in-out infinite;
 }
 @keyframes nowPulse{
@@ -143,11 +164,28 @@ body{
   50%{ opacity:1; }
 }
 
+/* тонкі “ризики” у місцях перемикання (підсилює читабельність) */
+.changeTick{
+  position:absolute;
+  top:-2px;
+  bottom:-2px;
+  width:2px;
+  transform: translateX(-50%);
+  border-radius:999px;
+  opacity:.55;
+  z-index: 2;
+  pointer-events:none;
+}
+.changeTick.on{ background: rgba(74,222,128,.55); }
+.changeTick.off{ background: rgba(251,75,75,.55); }
+
 @media (max-width: 520px){
   .wrap{padding:14px 14px 22px}
   .timeline{ gap:1px; }
   .slot{ height:12px; border-radius:3px; }
-  .nowLine{ width:3px; }
+  .nowLine{ width:4px; }
+  .changes{ height:38px; }
+  .chg{ font-size:10px; padding:2px 5px; }
 }
 
 .legend{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:12px}
@@ -297,221 +335,4 @@ body{
   function regionsArray(regions) {
     if (!regions) return [];
     if (Array.isArray(regions)) return regions;
-    if (typeof regions === "object") return Object.values(regions);
-    return [];
-  }
-
-  function pickRegion(regions, cpuCandidates, hints) {
-    const cpuList = (cpuCandidates || []).map(normalizeText).filter(Boolean);
-    if (cpuList.length) {
-      const hit = regions.find(r => cpuList.includes(normalizeText(r.cpu)));
-      if (hit) return hit;
-    }
-
-    const hs = (hints || []).map(normalizeText).filter(Boolean);
-    if (hs.length) {
-      const hit = regions.find(r => {
-        const text = [
-          r.cpu, r.name_ua, r.name_en, r.name_ru, r.name, r.title, r.city, r.region
-        ].map(normalizeText).join(" ");
-        return hs.some(h => text.includes(h));
-      });
-      if (hit) return hit;
-    }
-    return null;
-  }
-
-  function getScheduleContainer(region) {
-    return region?.schedule || region?.queues || region?.schedules || null;
-  }
-
-  function getQueueObj(container, queue) {
-    if (!container || typeof container !== "object") return null;
-    return container[queue] || null;
-  }
-
-  // scheme:
-  // - if any '2' => 1=ON, 2=OFF, 0=UNKNOWN
-  // - else => 0=ON, 1=OFF
-  function detectScheme(dayMap) {
-    const vals = Object.values(dayMap || {})
-      .map(v => (typeof v === "string" ? Number(v) : v))
-      .filter(v => Number.isFinite(v));
-    return vals.includes(2) ? "012" : "01";
-  }
-
-  function decode(v, scheme) {
-    const n = (typeof v === "string") ? Number(v) : v;
-    if (!Number.isFinite(n)) return "unknown";
-    if (scheme === "012") {
-      if (n === 1) return "on";
-      if (n === 2) return "off";
-      return "unknown";
-    }
-    if (n === 0) return "on";
-    if (n === 1) return "off";
-    return "unknown";
-  }
-
-  function normalizeTo48(dayMap) {
-    const out = new Array(48).fill("unknown");
-    if (!dayMap || typeof dayMap !== "object") return out;
-    const scheme = detectScheme(dayMap);
-    for (let i = 0; i < 48; i++) out[i] = decode(dayMap[slotKey(i)], scheme);
-    return out;
-  }
-
-  function resolve(data, spec, queue, diag, tag) {
-    const regs = regionsArray(data.regions);
-    const region = pickRegion(regs, spec.cpuCandidates, spec.hints);
-
-    if (!region) {
-      diag.push(`[${tag}] region => NOT FOUND`);
-      diag.push(`  cpu sample: ${regs.map(r => r.cpu).filter(Boolean).slice(0, 25).join(", ")}`);
-      return null;
-    }
-
-    const container = getScheduleContainer(region);
-    if (!container) {
-      diag.push(`[${tag}] cpu=${region.cpu} schedule => MISSING`);
-      return null;
-    }
-
-    const qObj = getQueueObj(container, queue);
-    if (!qObj) {
-      diag.push(`[${tag}] cpu=${region.cpu} queue=${queue} => NOT FOUND`);
-      diag.push(`  queues sample: ${Object.keys(container).slice(0, 30).join(", ")}`);
-      return null;
-    }
-
-    const dt = data.date_today;
-    const d2 = data.date_tomorrow;
-    const todayMap = (dt && qObj[dt]) ? qObj[dt] : null;
-    const tomorrowMap = (d2 && qObj[d2]) ? qObj[d2] : null;
-
-    diag.push(`[${tag}] cpu=${region.cpu} queue=${queue} => OK`);
-
-    return {
-      dt: String(dt || "today"),
-      d2: String(d2 || "tomorrow"),
-      todaySlots: normalizeTo48(todayMap || {}),
-      tomorrowSlots: normalizeTo48(tomorrowMap || {}),
-    };
-  }
-
-  // ---------- Render ----------
-  function axisEl() {
-    const axis = document.createElement("div");
-    axis.className = "axis";
-    axis.innerHTML = `<span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>`;
-    return axis;
-  }
-
-  function renderTimeline(slots48, { highlightNow = false } = {}) {
-    const block = document.createElement("div");
-    block.appendChild(axisEl());
-
-    const tl = document.createElement("div");
-    tl.className = "timeline";
-
-    const nowIdx = highlightNow ? nowIndexForToday() : -1;
-
-    for (let i = 0; i < 48; i++) {
-      const st = slots48[i] || "unknown";
-      const cell = document.createElement("div");
-      cell.className = `slot ${st}${i === nowIdx ? " now" : ""}`;
-      tl.appendChild(cell);
-    }
-
-    const tlWrap = document.createElement("div");
-    tlWrap.className = "timelineWrap";
-    tlWrap.appendChild(tl);
-
-    if (nowIdx >= 0) {
-      const line = document.createElement("div");
-      line.className = "nowLine";
-      line.style.left = `${((nowIdx + 0.5) / 48) * 100}%`;
-      tlWrap.appendChild(line);
-    }
-
-    block.appendChild(tlWrap);
-    return block;
-  }
-
-  function renderBlock(mount, label, slots48, highlightNow) {
-    const row = document.createElement("div");
-
-    const lbl = document.createElement("div");
-    lbl.className = "dayLabel";
-    lbl.innerHTML = `<span>${esc(label)}</span><span></span>`;
-    row.appendChild(lbl);
-
-    row.appendChild(renderTimeline(slots48, { highlightNow }));
-    mount.appendChild(row);
-  }
-
-  // ---------- Main ----------
-  async function refresh() {
-    const diag = [];
-    const btn = el("btnRefresh");
-    btn.disabled = true;
-
-    try {
-      diag.push("Завантажую дані…");
-      const data = await fetchJson(`${DATA_URL}?_=${Date.now()}`);
-      setMetaNow();
-
-      diag.push(`Data loaded from: ${DATA_URL}`);
-      diag.push(`Top-level keys: ${Object.keys(data || {}).join(", ")}`);
-
-      const kyiv = resolve(data, KYIV, KYIV.queue, diag, "kyiv");
-      el("kyivContent").innerHTML = "";
-      if (kyiv) {
-        renderBlock(el("kyivContent"), `Сьогодні (${kyiv.dt})`, kyiv.todaySlots, true);
-        renderBlock(el("kyivContent"), `Завтра (${kyiv.d2})`, kyiv.tomorrowSlots, false);
-      }
-
-      const homeSpec = { cpuCandidates: HOME.cpuCandidates, hints: HOME.hints };
-      const homeLight = resolve(data, homeSpec, HOME.light.queue, diag, "brovary-light");
-      const homeWater = resolve(data, homeSpec, HOME.water.queue, diag, "brovary-water");
-
-      el("homeTodayContent").innerHTML = "";
-      el("homeTomorrowContent").innerHTML = "";
-
-      if (homeLight && homeWater) {
-        el("homeTodaySub").textContent = `${HOME.cityLabel} • ${homeLight.dt}`;
-        el("homeTomorrowSub").textContent = `${HOME.cityLabel} • ${homeLight.d2}`;
-
-        renderBlock(el("homeTodayContent"), HOME.light.label, homeLight.todaySlots, true);
-        renderBlock(el("homeTodayContent"), HOME.water.label, homeWater.todaySlots, true);
-
-        renderBlock(el("homeTomorrowContent"), HOME.light.label, homeLight.tomorrowSlots, false);
-        renderBlock(el("homeTomorrowContent"), HOME.water.label, homeWater.tomorrowSlots, false);
-      } else {
-        if (!homeLight) diag.push("[home] light schedule missing");
-        if (!homeWater) diag.push("[home] water schedule missing");
-      }
-
-      setDiag(diag);
-    } catch (e) {
-      diag.push(`ERROR: ${e?.message || String(e)}`);
-      setDiag(diag);
-      el("lastUpdate").textContent = "—";
-      el("nextUpdate").textContent = "—";
-    } finally {
-      btn.disabled = false;
-    }
-  }
-
-  function boot() {
-    injectCss();
-    buildLayout();
-    refresh();
-  }
-
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", boot);
-  } else {
-    boot();
-  }
-})();
+    if (typeof regions === "object") return Object
