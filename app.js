@@ -93,12 +93,13 @@ body{
   margin:10px 0 6px;color:var(--muted);font-size:12px;font-weight:700
 }
 
-/* ✅ підписи тільки в моменти зміни */
+/* Підписи тільки в моменти зміни */
 .changes{
   position:relative;
-  height:34px;
+  height:36px;
   margin: 0 0 6px;
 }
+.changes.dim{ opacity:.75; }
 .chg{
   position:absolute;
   top:0;
@@ -132,10 +133,10 @@ body{
 .slot.off{background: var(--red)}
 .slot.unknown{background: var(--gray)}
 
-/* ✅ завтра приглушено */
+/* Завтра приглушено */
 .timeline.dim .slot{ opacity:.68; }
 
-/* ✅ “ЗАРАЗ” — дуже помітно */
+/* ЗАРАЗ — дуже помітно */
 .slot.now{
   outline:none;
   box-shadow:
@@ -164,7 +165,7 @@ body{
   50%{ opacity:1; }
 }
 
-/* тонкі “ризики” у місцях перемикання (підсилює читабельність) */
+/* Тонкі “ризики” у місцях перемикання */
 .changeTick{
   position:absolute;
   top:-2px;
@@ -184,7 +185,7 @@ body{
   .timeline{ gap:1px; }
   .slot{ height:12px; border-radius:3px; }
   .nowLine{ width:4px; }
-  .changes{ height:38px; }
+  .changes{ height:40px; }
   .chg{ font-size:10px; padding:2px 5px; }
 }
 
@@ -335,4 +336,290 @@ body{
   function regionsArray(regions) {
     if (!regions) return [];
     if (Array.isArray(regions)) return regions;
-    if (typeof regions === "object") return Object
+    if (typeof regions === "object") return Object.values(regions);
+    return [];
+  }
+
+  function pickRegion(regions, cpuCandidates, hints) {
+    const cpuList = (cpuCandidates || []).map(normalizeText).filter(Boolean);
+    if (cpuList.length) {
+      const hit = regions.find(r => cpuList.includes(normalizeText(r.cpu)));
+      if (hit) return hit;
+    }
+
+    const hs = (hints || []).map(normalizeText).filter(Boolean);
+    if (hs.length) {
+      const hit = regions.find(r => {
+        const text = [
+          r.cpu, r.name_ua, r.name_en, r.name_ru, r.name, r.title, r.city, r.region
+        ].map(normalizeText).join(" ");
+        return hs.some(h => text.includes(h));
+      });
+      if (hit) return hit;
+    }
+    return null;
+  }
+
+  function getScheduleContainer(region) {
+    return region?.schedule || region?.queues || region?.schedules || null;
+  }
+
+  function getQueueObj(container, queue) {
+    if (!container || typeof container !== "object") return null;
+    return container[queue] || null;
+  }
+
+  // scheme:
+  // - if any '2' => 1=ON, 2=OFF, 0=UNKNOWN
+  // - else => 0=ON, 1=OFF
+  function detectScheme(dayMap) {
+    const vals = Object.values(dayMap || {})
+      .map(v => (typeof v === "string" ? Number(v) : v))
+      .filter(v => Number.isFinite(v));
+    return vals.includes(2) ? "012" : "01";
+  }
+
+  function decode(v, scheme) {
+    const n = (typeof v === "string") ? Number(v) : v;
+    if (!Number.isFinite(n)) return "unknown";
+    if (scheme === "012") {
+      if (n === 1) return "on";
+      if (n === 2) return "off";
+      return "unknown";
+    }
+    if (n === 0) return "on";
+    if (n === 1) return "off";
+    return "unknown";
+  }
+
+  function normalizeTo48(dayMap) {
+    const out = new Array(48).fill("unknown");
+    if (!dayMap || typeof dayMap !== "object") return out;
+    const scheme = detectScheme(dayMap);
+    for (let i = 0; i < 48; i++) out[i] = decode(dayMap[slotKey(i)], scheme);
+    return out;
+  }
+
+  function resolve(data, spec, queue, diag, tag) {
+    const regs = regionsArray(data.regions);
+    const region = pickRegion(regs, spec.cpuCandidates, spec.hints);
+
+    if (!region) {
+      diag.push(`[${tag}] region => NOT FOUND`);
+      diag.push(`  cpu sample: ${regs.map(r => r.cpu).filter(Boolean).slice(0, 25).join(", ")}`);
+      return null;
+    }
+
+    const container = getScheduleContainer(region);
+    if (!container) {
+      diag.push(`[${tag}] cpu=${region.cpu} schedule => MISSING`);
+      return null;
+    }
+
+    const qObj = getQueueObj(container, queue);
+    if (!qObj) {
+      diag.push(`[${tag}] cpu=${region.cpu} queue=${queue} => NOT FOUND`);
+      diag.push(`  queues sample: ${Object.keys(container).slice(0, 30).join(", ")}`);
+      return null;
+    }
+
+    const dt = data.date_today;
+    const d2 = data.date_tomorrow;
+    const todayMap = (dt && qObj[dt]) ? qObj[dt] : null;
+    const tomorrowMap = (d2 && qObj[d2]) ? qObj[d2] : null;
+
+    diag.push(`[${tag}] cpu=${region.cpu} queue=${queue} => OK`);
+
+    return {
+      dt: String(dt || "today"),
+      d2: String(d2 || "tomorrow"),
+      todaySlots: normalizeTo48(todayMap || {}),
+      tomorrowSlots: normalizeTo48(tomorrowMap || {}),
+    };
+  }
+
+  // ---------- Labels only on changes ----------
+  function isOnOff(x) {
+    return x === "on" || x === "off";
+  }
+
+  function computeChanges(slots48) {
+    const changes = [];
+    let prev = slots48[0];
+
+    for (let i = 1; i < 48; i++) {
+      const cur = slots48[i];
+      if (cur === prev) continue;
+
+      // підписуємо тільки події вкл/викл (ігноруємо unknown-переходи)
+      if (isOnOff(cur) && isOnOff(prev)) {
+        changes.push({ i, state: cur, time: slotKey(i) });
+      }
+      prev = cur;
+    }
+    return changes;
+  }
+
+  // ---------- Render ----------
+  function renderChangeLabels(changes, { dim = false } = {}) {
+    const wrap = document.createElement("div");
+    wrap.className = `changes${dim ? " dim" : ""}`;
+
+    let lastLeft = -999;
+    let altToggle = false;
+
+    for (const ch of changes) {
+      const left = ((ch.i) / 48) * 100;
+
+      const lbl = document.createElement("div");
+      lbl.className = `chg ${ch.state}`;
+
+      // якщо дуже близько — чергуємо рядки, щоб не злипалось
+      const tooClose = (left - lastLeft) < 4; // ~2 години по ширині
+      if (tooClose) altToggle = !altToggle;
+      if (altToggle) lbl.classList.add("alt");
+
+      lbl.style.left = `${left}%`;
+      lbl.textContent = ch.time;
+      wrap.appendChild(lbl);
+
+      lastLeft = left;
+      altToggle = !altToggle;
+    }
+
+    return wrap;
+  }
+
+  function renderTimeline(slots48, { highlightNow = false, dim = false } = {}) {
+    const block = document.createElement("div");
+
+    const changes = computeChanges(slots48);
+    block.appendChild(renderChangeLabels(changes, { dim }));
+
+    const tl = document.createElement("div");
+    tl.className = `timeline${dim ? " dim" : ""}`;
+
+    const nowIdx = highlightNow ? nowIndexForToday() : -1;
+
+    for (let i = 0; i < 48; i++) {
+      const st = slots48[i] || "unknown";
+      const cell = document.createElement("div");
+      cell.className = `slot ${st}${i === nowIdx ? " now" : ""}`;
+      tl.appendChild(cell);
+    }
+
+    const tlWrap = document.createElement("div");
+    tlWrap.className = "timelineWrap";
+    tlWrap.appendChild(tl);
+
+    // ticks у місцях зміни
+    for (const ch of changes) {
+      const tick = document.createElement("div");
+      tick.className = `changeTick ${ch.state}`;
+      tick.style.left = `${((ch.i) / 48) * 100}%`;
+      tlWrap.appendChild(tick);
+    }
+
+    // now line
+    if (nowIdx >= 0) {
+      const line = document.createElement("div");
+      line.className = "nowLine";
+      line.style.left = `${((nowIdx + 0.5) / 48) * 100}%`;
+      tlWrap.appendChild(line);
+    }
+
+    block.appendChild(tlWrap);
+    return block;
+  }
+
+  function renderBlock(mount, label, slots48, { highlightNow = false, dim = false } = {}) {
+    const row = document.createElement("div");
+
+    const lbl = document.createElement("div");
+    lbl.className = "dayLabel";
+    lbl.innerHTML = `<span>${esc(label)}</span><span></span>`;
+    row.appendChild(lbl);
+
+    row.appendChild(renderTimeline(slots48, { highlightNow, dim }));
+    mount.appendChild(row);
+  }
+
+  // ---------- Main ----------
+  async function refresh() {
+    const diag = [];
+    const btn = el("btnRefresh");
+    if (btn) btn.disabled = true;
+
+    try {
+      diag.push("Завантажую дані…");
+      const data = await fetchJson(`${DATA_URL}?_=${Date.now()}`);
+      setMetaNow();
+
+      diag.push(`Data loaded from: ${DATA_URL}`);
+      diag.push(`Top-level keys: ${Object.keys(data || {}).join(", ")}`);
+
+      // KYIV
+      const kyiv = resolve(data, KYIV, KYIV.queue, diag, "kyiv");
+      el("kyivContent").innerHTML = "";
+      if (kyiv) {
+        renderBlock(el("kyivContent"), `Сьогодні (${kyiv.dt})`, kyiv.todaySlots, { highlightNow: true, dim: false });
+        renderBlock(el("kyivContent"), `Завтра (${kyiv.d2})`, kyiv.tomorrowSlots, { highlightNow: false, dim: true });
+      }
+
+      // HOME
+      const homeSpec = { cpuCandidates: HOME.cpuCandidates, hints: HOME.hints };
+      const homeLight = resolve(data, homeSpec, HOME.light.queue, diag, "brovary-light");
+      const homeWater = resolve(data, homeSpec, HOME.water.queue, diag, "brovary-water");
+
+      el("homeTodayContent").innerHTML = "";
+      el("homeTomorrowContent").innerHTML = "";
+
+      if (homeLight && homeWater) {
+        el("homeTodaySub").textContent = `${HOME.cityLabel} • ${homeLight.dt}`;
+        el("homeTomorrowSub").textContent = `${HOME.cityLabel} • ${homeLight.d2}`;
+
+        // today
+        renderBlock(el("homeTodayContent"), HOME.light.label, homeLight.todaySlots, { highlightNow: true, dim: false });
+        renderBlock(el("homeTodayContent"), HOME.water.label, homeWater.todaySlots, { highlightNow: true, dim: false });
+
+        // tomorrow (dim)
+        renderBlock(el("homeTomorrowContent"), HOME.light.label, homeLight.tomorrowSlots, { highlightNow: false, dim: true });
+        renderBlock(el("homeTomorrowContent"), HOME.water.label, homeWater.tomorrowSlots, { highlightNow: false, dim: true });
+      } else {
+        if (!homeLight) diag.push("[home] light schedule missing");
+        if (!homeWater) diag.push("[home] water schedule missing");
+      }
+
+      setDiag(diag);
+    } catch (e) {
+      const msg = `ERROR: ${e?.message || String(e)}`;
+      try {
+        setDiag([msg]);
+      } catch {}
+      // якщо впало дуже рано — покажемо хоча б текст
+      const app = el("app");
+      if (app && !el("yk-root")) app.textContent = msg;
+      console.error(e);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function boot() {
+    try {
+      injectCss();
+      buildLayout();
+      refresh();
+    } catch (e) {
+      console.error(e);
+      const app = el("app");
+      if (app) app.textContent = `ERROR: ${e?.message || String(e)}`;
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+})();
